@@ -32,6 +32,19 @@ export interface ChecklistItem {
   done: boolean;
 }
 
+/**
+ * Carry-over metadata attached to a Task when it is forwarded from a previous study day.
+ * All fields are optional — absence means the task has never been carried over.
+ */
+export interface CarryOverMetadata {
+  /** Total number of times this task has been carried over. */
+  carryOverCount: number;
+  /** ISO date string of the first day the task was carried over (YYYY-MM-DD). */
+  carriedSince: string;
+  /** Number of consecutive study days this task has been unfinished and carried forward. */
+  consecutiveCarryOvers: number;
+}
+
 export interface Task {
   id: string;
   blockId: string;
@@ -51,6 +64,10 @@ export interface Task {
   checklist: ChecklistItem[];
   subtasks?: Subtask[];
   createdAt: string;
+  // Carry-over tracking — populated by the Carry-over Engine
+  carryOverCount?: number;
+  carriedSince?: string;         // YYYY-MM-DD of first carry-over
+  consecutiveCarryOvers?: number;
 }
 
 export interface StudyBlock {
