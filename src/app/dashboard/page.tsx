@@ -1,8 +1,10 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useMemo } from 'react';
 import { useAppStore } from '../../stores/useAppStore';
 import { plannerAgent } from '../../agents/planner.agent';
+import { identifyDueRevisions } from '../../engines/planner/revisionScheduler';
+import { Roadmap } from '../../types';
 import { 
   Flame, 
   Award, 
@@ -11,7 +13,11 @@ import {
   BookOpen,
   Calendar,
   Layers,
-  RefreshCw
+  RefreshCw,
+  Clock,
+  CheckCircle2,
+  TrendingDown,
+  TrendingUp
 } from 'lucide-react';
 import { 
   ResponsiveContainer, 
@@ -23,18 +29,15 @@ import {
 } from 'recharts';
 
 export default function Dashboard() {
-  const { profile, blocks, analytics} = useAppStore();
-  const [greeting, setGreeting] = useState('Welcome back');
+  const { profile, blocks, analytics, roadmaps } = useAppStore();
   const [isPlanning, setIsPlanning] = useState(false);
 
   // Set greeting based on local time
-  useEffect(() => {
+  const greeting = useMemo(() => {
     const hrs = new Date().getHours();
-    setTimeout(() => {
-      if (hrs < 12) setGreeting('Good morning');
-      else if (hrs < 17) setGreeting('Good afternoon');
-      else setGreeting('Good evening');
-    }, 0);
+    if (hrs < 12) return 'Good morning';
+    if (hrs < 17) return 'Good afternoon';
+    return 'Good evening';
   }, []);
 
   // Trigger AI Daily Planner recalculation
@@ -46,14 +49,124 @@ export default function Dashboard() {
     }, 800);
   };
 
-  // Prepare skill radar data dynamically from roadmaps
-  const skillData = [
-    { subject: 'DSA', value: 85, fullMark: 100 },
-    { subject: 'React', value: 70, fullMark: 100 },
-    { subject: 'SQL', value: 80, fullMark: 100 },
-    { subject: 'Systems', value: 45, fullMark: 100 },
-    { subject: 'AI / PyTorch', value: 55, fullMark: 100 },
-  ];
+  // --- 1. Dynamic Metrics & Analytics Calculations ---
+  
+  // Total study hours logged across all analytics days
+  const totalStudyHoursVal = useMemo(() => {
+    return parseFloat(analytics.reduce((sum, day) => sum + (day.studyHours || 0), 0).toFixed(1));
+  }, [analytics]);
+
+  // Average daily study hours
+  const avgStudyHours = useMemo(() => {
+    if (analytics.length === 0) return 0;
+    const sum = analytics.reduce((s, day) => s + (day.studyHours || 0), 0);
+    return parseFloat((sum / analytics.length).toFixed(1));
+  }, [analytics]);
+
+  // Gather all items across all roadmaps
+  const allRoadmapItems = useMemo(() => {
+    return roadmaps.flatMap(r => r.items.map(item => ({ ...item, roadmapTitle: r.title })));
+  }, [roadmaps]);
+
+  // Overall roadmap completion percentage
+  const overallCompletionPercent = useMemo(() => {
+    if (allRoadmapItems.length === 0) return 0;
+    const completed = allRoadmapItems.filter(item => item.completionState === 'Completed').length;
+    return Math.round((completed / allRoadmapItems.length) * 100);
+  }, [allRoadmapItems]);
+
+  // Count of completed roadmap topics
+  const completedTopicsCount = useMemo(() => {
+    return allRoadmapItems.filter(item => item.completionState === 'Completed').length;
+  }, [allRoadmapItems]);
+
+  // Count of active roadmaps (in progress / not completed)
+  const activeRoadmapsCount = useMemo(() => {
+    return roadmaps.filter(r => r.completionState !== 'Completed').length;
+  }, [roadmaps]);
+
+  // --- 2. Spaced Repetition / Revision Analytics ---
+  
+  // Due revisions list
+  const dueRevisions = useMemo(() => {
+    const completedItems = allRoadmapItems.filter(item => item.completionState === 'Completed');
+    // Call the pure revisionScheduler engine helper
+    return identifyDueRevisions(completedItems);
+  }, [allRoadmapItems]);
+
+  // Upcoming revisions (completed but not yet due, sorted by next review date)
+  const upcomingRevisions = useMemo(() => {
+    const completedItems = allRoadmapItems.filter(item => item.completionState === 'Completed');
+    const dueIds = new Set(dueRevisions.map(dr => dr.item.id));
+    
+    // Filter out already due items, sort by projected studied time or estimate
+    return completedItems
+      .filter(item => !dueIds.has(item.id))
+      .map(item => {
+        // Estimate next review date based on lastStudied & frequency
+        let intervalDays = 7;
+        if (item.revisionFrequency === 'Daily') intervalDays = 1;
+        else if (item.revisionFrequency === 'Biweekly') intervalDays = 14;
+        else if (item.revisionFrequency === 'Monthly') intervalDays = 30;
+
+        const lastDate = item.lastStudied ? new Date(item.lastStudied) : new Date();
+        const nextDate = new Date(lastDate.getTime() + intervalDays * 24 * 60 * 60 * 1000);
+
+        return {
+          item,
+          nextReviewDate: nextDate.toISOString().split('T')[0]
+        };
+      })
+      .sort((a, b) => a.nextReviewDate.localeCompare(b.nextReviewDate))
+      .slice(0, 3);
+  }, [allRoadmapItems, dueRevisions]);
+
+  // Recently completed revisions (topics studied sorted by lastStudied descending)
+  const recentlyCompletedRevisions = useMemo(() => {
+    return allRoadmapItems
+      .filter(item => item.completionState === 'Completed' && item.lastStudied)
+      .sort((a, b) => (b.lastStudied || '').localeCompare(a.lastStudied || ''))
+      .slice(0, 3);
+  }, [allRoadmapItems]);
+
+  // --- 3. Weakest Topics ---
+  const weakestTopics = useMemo(() => {
+    return [...allRoadmapItems]
+      .sort((a, b) => (b.weaknessScore || 0) - (a.weaknessScore || 0))
+      .slice(0, 3);
+  }, [allRoadmapItems]);
+
+  // --- 4. Dynamic Skill Radar Data ---
+  const skillData = useMemo(() => {
+    return roadmaps.map(r => {
+      const items = r.items;
+      if (items.length === 0) return { subject: r.title, value: 0, fullMark: 100 };
+      
+      // Calculate subject proficiency: average of interviewReadiness or confidenceScore scaled
+      const totalReadiness = items.reduce((sum, item) => {
+        let score = item.interviewReadiness || 0;
+        if (score === 0 && item.completionState === 'Completed') {
+          score = 80; // default readiness weight for completed
+        } else if (score === 0) {
+          score = (item.confidenceScore || 0) * 20; // fallback to confidence
+        }
+        return sum + score;
+      }, 0);
+
+      const value = Math.round(totalReadiness / items.length);
+
+      // Shorten titles for radar display
+      let subject = r.title;
+      if (subject.toLowerCase().includes('data structures')) subject = 'DSA';
+      else if (subject.toLowerCase().includes('react')) subject = 'React';
+
+      return {
+        subject,
+        value,
+        fullMark: 100
+      };
+    });
+  }, [roadmaps]);
 
   // Helper to determine heatmap square color opacity based on hours studied
   const getHeatmapColor = (hours: number) => {
@@ -68,8 +181,26 @@ export default function Dashboard() {
   const weekdays = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
 
   // Flatten all tasks today
-  const todaysTasks = blocks.flatMap(b => b.tasks?.map(t => ({ ...t, blockTitle: b.title, blockColor: b.color })) || []);
-  const pendingTasks = todaysTasks.filter(t => t.status !== 'Completed');
+  const todaysTasks = useMemo(() => {
+    return blocks.flatMap(b => b.tasks?.map(t => ({ ...t, blockTitle: b.title, blockColor: b.color })) || []);
+  }, [blocks]);
+  
+  const pendingTasks = useMemo(() => {
+    return todaysTasks.filter(t => t.status !== 'Completed');
+  }, [todaysTasks]);
+
+  // Calculate XP percentage to level up (assume 1000 XP per level)
+  const xpPercentage = useMemo(() => {
+    const xpInCurrentLevel = profile.xp % 1000;
+    return (xpInCurrentLevel / 1000) * 100;
+  }, [profile.xp]);
+
+  // Calculate overall roadmap progress percentage per roadmap
+  const getRoadmapProgress = (roadmap: Roadmap) => {
+    if (!roadmap.items || roadmap.items.length === 0) return 0;
+    const completed = roadmap.items.filter(item => item.completionState === 'Completed').length;
+    return Math.round((completed / roadmap.items.length) * 100);
+  };
 
   return (
     <div className="flex-1 p-6 md:p-8 space-y-6 max-w-7xl mx-auto w-full">
@@ -97,50 +228,81 @@ export default function Dashboard() {
       {/* Main Grid */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         
-        {/* Left Column - Gamification & Analytics Heatmap */}
+        {/* Left/Middle Column - Gamification & Analytics Heatmap & Path Blocks */}
         <div className="lg:col-span-2 space-y-6">
           
           {/* Stats Summary cards */}
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
             {/* Level Panel */}
-            <div className="glass-panel p-4 flex items-center gap-4 relative overflow-hidden">
-              <div className="w-11 h-11 rounded-xl bg-purple-500/10 border border-purple-500/20 flex items-center justify-center text-purple-400">
-                <Award className="w-6 h-6" />
+            <div className="glass-panel p-4 flex flex-col justify-between relative overflow-hidden gap-2">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-purple-500/10 border border-purple-500/20 flex items-center justify-center text-purple-400 shrink-0">
+                  <Award className="w-5 h-5" />
+                </div>
+                <div>
+                  <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Level</p>
+                  <p className="text-lg font-black text-white leading-none">Lvl {profile.level}</p>
+                </div>
               </div>
-              <div>
-                <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">Current Level</p>
-                <p className="text-2xl font-black text-white">Lvl {profile.level}</p>
+              {/* Mini level progress bar */}
+              <div className="w-full bg-slate-900 h-1 rounded-full overflow-hidden border border-white/5">
+                <div className="h-full bg-purple-500" style={{ width: `${xpPercentage}%` }} />
               </div>
             </div>
 
             {/* Streak Panel */}
-            <div className="glass-panel p-4 flex items-center gap-4 relative overflow-hidden">
-              <div className="w-11 h-11 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center text-amber-400">
-                <Flame className="w-6 h-6 fill-amber-500/20" />
+            <div className="glass-panel p-4 flex items-center gap-3 relative overflow-hidden">
+              <div className="w-10 h-10 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center text-amber-400 shrink-0">
+                <Flame className="w-5 h-5 fill-amber-500/20" />
               </div>
               <div>
-                <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">Study Streak</p>
-                <p className="text-2xl font-black text-amber-400">{profile.streak} Days</p>
+                <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Streak</p>
+                <p className="text-lg font-black text-amber-400 leading-none">{profile.streak} Days</p>
               </div>
             </div>
 
             {/* Total XP Panel */}
-            <div className="glass-panel p-4 flex items-center gap-4 relative overflow-hidden">
-              <div className="w-11 h-11 rounded-xl bg-cyan-500/10 border border-cyan-500/20 flex items-center justify-center text-cyan-400">
-                <Sparkles className="w-6 h-6" />
+            <div className="glass-panel p-4 flex items-center gap-3 relative overflow-hidden">
+              <div className="w-10 h-10 rounded-xl bg-cyan-500/10 border border-cyan-500/20 flex items-center justify-center text-cyan-400 shrink-0">
+                <Sparkles className="w-5 h-5" />
               </div>
               <div>
-                <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">Total XP</p>
-                <p className="text-2xl font-black text-cyan-400">{profile.xp} Points</p>
+                <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Total XP</p>
+                <p className="text-lg font-black text-cyan-400 leading-none">{profile.xp}</p>
+              </div>
+            </div>
+
+            {/* Overall Completion Rate */}
+            <div className="glass-panel p-4 flex flex-col justify-between relative overflow-hidden gap-2">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400 shrink-0">
+                  <CheckCircle2 className="w-5 h-5 text-emerald-400" />
+                </div>
+                <div>
+                  <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Completion</p>
+                  <p className="text-lg font-black text-emerald-400 leading-none">{overallCompletionPercent}%</p>
+                </div>
+              </div>
+              <div className="text-[10px] text-slate-500 font-semibold leading-none">
+                {completedTopicsCount} topics done
               </div>
             </div>
           </div>
 
           {/* GitHub Study Heatmap */}
           <div className="glass-panel p-5 space-y-4">
-            <div>
-              <h3 className="font-bold text-base text-white">Study Velocity Heatmap</h3>
-              <p className="text-xs text-slate-400">Tracks hours studied daily over the last 6 weeks.</p>
+            <div className="flex justify-between items-center">
+              <div>
+                <h3 className="font-bold text-base text-white">Study Velocity Heatmap</h3>
+                <p className="text-xs text-slate-400">Tracks hours studied daily over the last 6 weeks.</p>
+              </div>
+              <div className="text-right">
+                <span className="text-[10px] font-bold text-slate-500 uppercase block">Total Study Time</span>
+                <span className="text-sm font-black text-white flex items-center gap-1">
+                  <Clock className="w-4 h-4 text-cyan-400" />
+                  {totalStudyHoursVal} Hours
+                </span>
+              </div>
             </div>
             
             <div className="flex gap-2 items-start justify-center pt-2 overflow-x-auto">
@@ -164,7 +326,7 @@ export default function Dashboard() {
             </div>
 
             {/* Heatmap Legend */}
-            <div className="flex justify-between items-center text-[10px] text-slate-500 pt-2 border-t border-white/5">
+            <div className="flex justify-between items-center text-[10px] text-slate-500 pt-2 border-t border-white/5 font-semibold">
               <span>6 weeks ago</span>
               <div className="flex items-center gap-1">
                 <span>Less</span>
@@ -186,7 +348,7 @@ export default function Dashboard() {
                 <h3 className="font-bold text-base text-white">Today&apos;s Focus Schedule</h3>
                 <p className="text-xs text-slate-400">Calculated by priority scheduler.</p>
               </div>
-              <span className="px-2 py-0.5 rounded-full bg-cyan-500/10 border border-cyan-500/20 text-[10px] font-semibold text-cyan-400 uppercase tracking-wider">
+              <span className="px-2.5 py-0.5 rounded-full bg-cyan-500/10 border border-cyan-500/20 text-[10px] font-bold text-cyan-400 uppercase tracking-wider">
                 {pendingTasks.length} Pending Tasks
               </span>
             </div>
@@ -231,7 +393,7 @@ export default function Dashboard() {
                                   }`}>
                                     {task.priority} Priority
                                   </span>
-                                  <span className="w-1 h-1 rounded-full bg-slate-600" />
+                                  <span className="w-1 h-1 rounded-full bg-slate-700" />
                                   <span className="text-slate-500">{task.estDuration} min</span>
                                 </div>
                               </div>
@@ -255,9 +417,51 @@ export default function Dashboard() {
             </div>
           </div>
 
+          {/* Roadmap Progress List */}
+          <div className="glass-panel p-5 space-y-4">
+            <div>
+              <h3 className="font-bold text-base text-white">📈 Roadmap Progress</h3>
+              <p className="text-xs text-slate-400">Completion analysis of all selected roadmaps.</p>
+            </div>
+
+            <div className="space-y-3.5">
+              {roadmaps.map(roadmap => {
+                const progress = getRoadmapProgress(roadmap);
+                const completedCount = roadmap.items.filter(i => i.completionState === 'Completed').length;
+                const totalCount = roadmap.items.length;
+                
+                // Calculate estimated hours remaining (completed items subtracted)
+                const remainingHours = roadmap.items
+                  .filter(i => i.completionState !== 'Completed')
+                  .reduce((sum, item) => sum + (item.estimatedHours || 0), 0);
+
+                return (
+                  <div key={roadmap.id} className="p-3.5 rounded-xl border border-white/5 bg-white/5 space-y-2.5">
+                    <div className="flex justify-between items-start gap-2">
+                      <div className="space-y-0.5">
+                        <span className="font-bold text-xs text-white block">{roadmap.title}</span>
+                        <span className="text-[10px] text-slate-400 font-medium">
+                          {completedCount} of {totalCount} topics completed • {remainingHours} hours remaining
+                        </span>
+                      </div>
+                      <span className="text-xs font-bold text-cyan-400">{progress}%</span>
+                    </div>
+
+                    <div className="h-1.5 bg-slate-900 rounded-full overflow-hidden border border-white/5">
+                      <div 
+                        className="h-full bg-gradient-to-r from-cyan-400 to-purple-600 rounded-full transition-all duration-300"
+                        style={{ width: `${progress}%` }}
+                      />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
         </div>
 
-        {/* Right Column - Skill Radar & AI insights */}
+        {/* Right Column - Skill Radar & Weakest & Revisions */}
         <div className="space-y-6">
           
           {/* Skill Radar Chart */}
@@ -293,6 +497,124 @@ export default function Dashboard() {
             </div>
           </div>
 
+          {/* 🔥 Weakest Topics Panel */}
+          <div className="glass-panel p-5 space-y-3">
+            <div className="flex items-center gap-1.5 text-rose-400 border-b border-white/5 pb-2">
+              <TrendingDown className="w-5 h-5" />
+              <h3 className="font-bold text-sm uppercase tracking-wider">🔥 Weakest Topics</h3>
+            </div>
+            <div className="space-y-2.5">
+              {weakestTopics.length === 0 ? (
+                <p className="text-xs text-slate-500 italic text-center py-4">No weakness metrics logged yet.</p>
+              ) : (
+                weakestTopics.map((topic, idx) => (
+                  <div key={topic.id} className="p-2.5 rounded-lg bg-white/5 border border-white/5 flex items-center justify-between gap-3">
+                    <div className="space-y-0.5 min-w-0">
+                      <p className="font-bold text-xs text-slate-200 truncate">{idx + 1}. {topic.title}</p>
+                      <p className="text-[10px] text-slate-500 font-medium truncate">{topic.roadmapTitle}</p>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0 text-right">
+                      <div className="flex flex-col items-end">
+                        <span className="text-[9px] font-bold text-slate-500 uppercase">WEAKNESS</span>
+                        <span className="text-xs font-black text-rose-400">{topic.weaknessScore}%</span>
+                      </div>
+                      <span className="text-[10px] bg-slate-900 border border-white/5 px-1.5 py-0.5 rounded font-bold text-slate-400" title="Confidence Score">
+                        C: {topic.confidenceScore}/5
+                      </span>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+
+          {/* 🔁 Revisions Due / Spaced Repetition Panel */}
+          <div className="glass-panel p-5 space-y-3">
+            <div className="flex items-center justify-between border-b border-white/5 pb-2">
+              <div className="flex items-center gap-1.5 text-cyan-400">
+                <Calendar className="w-5 h-5" />
+                <h3 className="font-bold text-sm uppercase tracking-wider">🔁 Revisions Due</h3>
+              </div>
+              <span className="px-2 py-0.5 rounded-full bg-cyan-500/10 border border-cyan-500/20 text-[9px] font-black text-cyan-400">
+                {dueRevisions.length} Due
+              </span>
+            </div>
+
+            {/* List of due items */}
+            <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
+              {dueRevisions.length === 0 ? (
+                <p className="text-xs text-slate-500 italic text-center py-4">All revisions complete for today!</p>
+              ) : (
+                dueRevisions.map(candidate => (
+                  <div key={candidate.item.id} className="p-2 rounded-lg bg-cyan-950/20 border border-cyan-500/20 flex items-center justify-between gap-3 text-xs">
+                    <div className="min-w-0 space-y-0.5">
+                      <p className="font-semibold text-slate-200 truncate">{candidate.item.title}</p>
+                      <p className="text-[9px] text-slate-500 font-medium">Interval: {candidate.sm2Result.intervalDays} day(s)</p>
+                    </div>
+                    <span className="text-[9px] bg-rose-500/10 text-rose-400 border border-rose-500/20 px-1.5 py-0.5 rounded font-bold uppercase shrink-0">
+                      DUE
+                    </span>
+                  </div>
+                ))
+              )}
+            </div>
+
+            {/* Spaced Repetition Timeline states */}
+            <div className="space-y-2 pt-2 border-t border-white/5 text-[11px]">
+              <span className="text-[9px] font-bold text-slate-500 uppercase tracking-wider block">Upcoming Review queue</span>
+              {upcomingRevisions.map(ur => (
+                <div key={ur.item.id} className="flex justify-between items-center text-slate-400">
+                  <span className="truncate pr-4">• {ur.item.title}</span>
+                  <span className="text-[10px] text-slate-500 shrink-0 font-medium">{ur.nextReviewDate}</span>
+                </div>
+              ))}
+
+              <span className="text-[9px] font-bold text-slate-500 uppercase tracking-wider block pt-2">Recently studied</span>
+              {recentlyCompletedRevisions.length === 0 ? (
+                <span className="text-slate-500 italic text-[10px]">No revision history.</span>
+              ) : (
+                recentlyCompletedRevisions.map(item => (
+                  <div key={item.id} className="flex justify-between items-center text-slate-400">
+                    <span className="truncate pr-4 text-emerald-500/90 font-medium">• {item.title}</span>
+                    <span className="text-[10px] text-slate-500 shrink-0">{item.lastStudied}</span>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+
+          {/* Completed Study Sessions Activity Log */}
+          <div className="glass-panel p-5 space-y-3">
+            <h3 className="font-bold text-sm text-white uppercase tracking-wider border-b border-white/5 pb-2 flex items-center gap-1.5">
+              <TrendingUp className="w-5 h-5 text-purple-400" />
+              Study Activity Log
+            </h3>
+            <div className="grid grid-cols-2 gap-2 text-center text-xs">
+              <div className="p-2.5 rounded-lg bg-white/5 border border-white/5">
+                <span className="text-[9px] font-bold text-slate-500 uppercase block mb-0.5">Average hours</span>
+                <span className="text-white font-black text-sm">{avgStudyHours}h / day</span>
+              </div>
+              <div className="p-2.5 rounded-lg bg-white/5 border border-white/5">
+                <span className="text-[9px] font-bold text-slate-500 uppercase block mb-0.5">Active Roadmaps</span>
+                <span className="text-white font-black text-sm">{activeRoadmapsCount} Active</span>
+              </div>
+            </div>
+
+            <div className="space-y-1.5 pt-2 text-[11px]">
+              <span className="text-[9px] font-bold text-slate-500 uppercase tracking-wider block">Recently completed topics</span>
+              {recentlyCompletedRevisions.length === 0 ? (
+                <p className="text-[10px] text-slate-500 italic">No topics completed yet.</p>
+              ) : (
+                recentlyCompletedRevisions.slice(0, 2).map(item => (
+                  <div key={item.id} className="flex items-center gap-1.5 p-2 rounded bg-emerald-500/5 border border-emerald-500/10 text-slate-300">
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                    <span className="truncate">{item.title}</span>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+
           {/* Quick Actions Panel */}
           <div className="glass-panel p-5 space-y-3">
             <h3 className="font-bold text-base text-white">Quick Actions</h3>
@@ -313,31 +635,6 @@ export default function Dashboard() {
                 <Layers className="w-5 h-5 text-amber-400 group-hover:scale-110 transition-transform" />
                 <span className="font-medium text-slate-200">Quiz & Deck</span>
               </button>
-            </div>
-          </div>
-
-          {/* AI Insights Card */}
-          <div className="glass-panel p-5 space-y-4 border border-cyan-500/25 shadow-lg shadow-cyan-500/5 relative overflow-hidden">
-            <div className="absolute top-0 right-0 w-20 h-20 bg-cyan-400/5 rounded-full blur-xl" />
-            <div className="flex items-center gap-2 text-cyan-400">
-              <Sparkles className="w-4 h-4" />
-              <h3 className="font-bold text-sm uppercase tracking-wider">AI Insights & Advice</h3>
-            </div>
-            
-            <div className="space-y-3.5 text-xs text-slate-300">
-              <p className="leading-relaxed">
-                Analyzing your study heatmap: You have been highly consistent over the last 14 days, averaging <span className="text-cyan-400 font-semibold">3.8 hours</span>/day.
-              </p>
-              
-              <div className="p-2.5 rounded-lg bg-white/5 space-y-1.5 border border-white/5">
-                <span className="text-[10px] font-bold uppercase tracking-wider text-purple-400">Strong Subjects</span>
-                <p className="text-slate-400">Arrays, Hashing and Java fundamentals (95% correctness).</p>
-              </div>
-
-              <div className="p-2.5 rounded-lg bg-white/5 space-y-1.5 border border-white/5">
-                <span className="text-[10px] font-bold uppercase tracking-wider text-rose-400">Recommended Next Step</span>
-                <p className="text-slate-400">Your Google interview onsite is in 10 days. The AI suggests scheduling a focus block on Binary Trees DFS/BFS traversal tomorrow.</p>
-              </div>
             </div>
           </div>
 
