@@ -7,6 +7,8 @@ import { calculateXP } from '../engines/planner/xp.engine';
 import { identifyCarryOverTasks, mergeTasksWithoutDuplicates } from '../engines/planner/carryOver';
 import { calculateTopicPriority } from '../engines/planner/priority';
 import { getEligibleTopics } from '../engines/planner/dependency';
+// Module 5: Revision Engine Integration
+import { identifyDueRevisions, generateRevisionBlocks } from '../engines/planner/revisionScheduler';
 import { Task, StudyBlock, DailyPlan } from '../types';
 
 export const plannerAgent = {
@@ -15,7 +17,15 @@ export const plannerAgent = {
    * Runs the calculation pipeline, updates tasks, schedules blocks, and updates repositories.
    */
   generateDailySchedule(): void {
+    // Module 5: Remove stale revision blocks from a previous run before
+    // rescheduling so they do not bleed into the normal study block pool.
+    taskRepository
+      .getBlocks()
+      .filter(b => b.id.startsWith('revision-block-'))
+      .forEach(b => taskRepository.deleteBlock(b.id));
+
     const availableHours = userRepository.getAvailableHours();
+    // Re-fetch blocks after deletion so the scheduler starts with a clean slate.
     const currentBlocks = taskRepository.getBlocks();
     const roadmaps = roadmapRepository.getRoadmaps();
     const applications = careerRepository.getApplications();
@@ -95,6 +105,19 @@ export const plannerAgent = {
     scheduledBlocks.forEach(b => {
       taskRepository.updateBlock(b.id, { tasks: b.tasks || [] });
     });
+
+    // 7. Module 5 — Generate and persist revision blocks.
+    //    Only completed roadmap items are eligible for SM-2 revision.
+    const completedItems = allRoadmapItems.filter(
+      item => item.completionState === 'Completed',
+    );
+    const revisionCandidates = identifyDueRevisions(completedItems);
+    const revisionBlocks = generateRevisionBlocks(
+      revisionCandidates,
+      scheduledBlocks,
+      1.5,
+    );
+    revisionBlocks.forEach(b => taskRepository.addBlock(b));
   }, // end generateDailySchedule
   /**
    * Generates a DailyPlan without persisting changes.
@@ -168,14 +191,33 @@ export const plannerAgent = {
 
     const estimatedXP = calculateXP(allCandidateTasks);
 
-    const totalStudyHours = scheduledBlocks.reduce((sum, b) => sum + b.estHours, 0);
-    const summary = `Planned ${scheduledBlocks.length} study blocks with ${allCandidateTasks.length} tasks, estimated XP ${estimatedXP}.`;
+    // Module 5: Generate revision blocks for completed roadmap items that are
+    // due for SM-2 spaced-repetition review today.
+    const allRoadmapItemsPlan = roadmaps.flatMap(r => r.items);
+    const completedItemsPlan = allRoadmapItemsPlan.filter(
+      item => item.completionState === 'Completed',
+    );
+    const revisionCandidates = identifyDueRevisions(completedItemsPlan);
+    const revisionBlocks = generateRevisionBlocks(
+      revisionCandidates,
+      scheduledBlocks,
+      1.5,
+    );
+
+    const revisionHours = revisionBlocks.reduce((sum, b) => sum + b.estHours, 0);
+    const totalStudyHours =
+      scheduledBlocks.reduce((sum, b) => sum + b.estHours, 0) + revisionHours;
+
+    const summary =
+      `Planned ${scheduledBlocks.length} study block(s) with ${allCandidateTasks.length} task(s)` +
+      `, ${revisionBlocks.length} revision block(s) with ${revisionCandidates.length} due item(s)` +
+      `, estimated XP ${estimatedXP}.`;
 
     return {
       orderedStudyBlocks: scheduledBlocks,
       scheduledTasks: allCandidateTasks,
       carryOverTasks: carryOver,
-      revisionBlocks: [],
+      revisionBlocks,
       estimatedXP,
       totalStudyHours,
       summary,
