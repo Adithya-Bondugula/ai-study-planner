@@ -1,0 +1,98 @@
+import { taskRepository } from '../repositories/task.repository';
+import { userRepository } from '../repositories/user.repository';
+import { roadmapRepository } from '../repositories/roadmap.repository';
+import { careerRepository } from '../repositories/career.repository';
+import { scheduleTasksIntoBlocks } from '../engines/planner/scheduler';
+import { identifyCarryOverTasks, mergeTasksWithoutDuplicates } from '../engines/planner/carryOver';
+import { calculateTopicPriority } from '../engines/planner/priority';
+import { getEligibleTopics } from '../engines/planner/dependency';
+import { Task, StudyBlock } from '../types';
+
+export const plannerAgent = {
+  /**
+   * Automatically orchestrates daily study schedules.
+   * Runs the calculation pipeline, updates tasks, schedules blocks, and updates repositories.
+   */
+  generateDailySchedule(): void {
+    const availableHours = userRepository.getAvailableHours();
+    const currentBlocks = taskRepository.getBlocks();
+    const roadmaps = roadmapRepository.getRoadmaps();
+    const applications = careerRepository.getApplications();
+
+    // 1. Identify carry over tasks from previous active blocks
+    const allPreviousTasks = currentBlocks.flatMap(b => b.tasks || []);
+    const carryOver = identifyCarryOverTasks(allPreviousTasks);
+
+    // 2. Identify eligible topics from roadmaps
+    const allRoadmapItems = roadmaps.flatMap(r => r.items);
+    const eligibleRoadmapItems = getEligibleTopics(allRoadmapItems);
+
+    // Find nearest interview date to calculate deadline proximity
+    let daysUntilInterview: number | null = null;
+    const interviewDates = applications
+      .filter(app => app.interviewDate)
+      .map(app => new Date(app.interviewDate!));
+    
+    if (interviewDates.length > 0) {
+      const nearest = new Date(Math.min(...interviewDates.map(d => d.getTime())));
+      const today = new Date();
+      const diffTime = nearest.getTime() - today.getTime();
+      daysUntilInterview = Math.max(0, Math.ceil(diffTime / (1000 * 60 * 60 * 24)));
+    }
+
+    // 3. Create tasks from eligible items
+    const newTasksFromRoadmap: Task[] = eligibleRoadmapItems.map(item => {
+      // Calculate dynamic priority score
+      const priorityScore = calculateTopicPriority(
+        item,
+        daysUntilInterview,
+        item.difficulty === 'Hard' ? 5 : item.difficulty === 'Medium' ? 3 : 1
+      );
+
+      let priority: Task['priority'] = 'Medium';
+      if (priorityScore > 75) priority = 'High';
+      else if (priorityScore < 35) priority = 'Low';
+
+      return {
+        id: `task-rm-${item.id}`,
+        blockId: '',
+        title: `Study: ${item.title}`,
+        description: `Learn next topic in roadmap. Prerequisites completed. Difficulty: ${item.difficulty}`,
+        estDuration: Math.round(item.estimatedHours * 60), // convert hours to minutes
+        priority,
+        difficulty: item.difficulty,
+        status: 'Todo',
+        tags: ['Roadmap', item.difficulty],
+        attachments: [],
+        notes: '',
+        resources: item.resources.map(r => ({ title: r.title, url: r.url })),
+        roadmapRefId: item.id,
+        aiSuggestions: `Priority Score: ${priorityScore}% calculated by Planning Engine.`,
+        progress: 0,
+        checklist: item.practiceQuestions.map((q, qidx) => ({
+          id: `checklist-pq-${item.id}-${qidx}`,
+          title: `Practice: ${q.question}`,
+          done: false
+        })),
+        createdAt: new Date().toISOString()
+      };
+    });
+
+    // 4. Merge carry-over tasks and new backlog items
+    const allCandidateTasks = mergeTasksWithoutDuplicates(carryOver, newTasksFromRoadmap);
+
+    // 5. Group into blocks
+    // Clean current blocks (empty tasks list first)
+    const emptyBlocks: StudyBlock[] = currentBlocks.map(b => ({
+      ...b,
+      tasks: []
+    }));
+
+    const scheduledBlocks = scheduleTasksIntoBlocks(availableHours, emptyBlocks, allCandidateTasks);
+
+    // 6. Save back to task repository blocks
+    scheduledBlocks.forEach(b => {
+      taskRepository.updateBlock(b.id, { tasks: b.tasks || [] });
+    });
+  }
+};
