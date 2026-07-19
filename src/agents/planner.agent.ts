@@ -3,10 +3,11 @@ import { userRepository } from '../repositories/user.repository';
 import { roadmapRepository } from '../repositories/roadmap.repository';
 import { careerRepository } from '../repositories/career.repository';
 import { scheduleTasksIntoBlocks } from '../engines/planner/scheduler';
+import { calculateXP } from '../engines/planner/xp.engine';
 import { identifyCarryOverTasks, mergeTasksWithoutDuplicates } from '../engines/planner/carryOver';
 import { calculateTopicPriority } from '../engines/planner/priority';
 import { getEligibleTopics } from '../engines/planner/dependency';
-import { Task, StudyBlock } from '../types';
+import { Task, StudyBlock, DailyPlan } from '../types';
 
 export const plannerAgent = {
   /**
@@ -94,5 +95,90 @@ export const plannerAgent = {
     scheduledBlocks.forEach(b => {
       taskRepository.updateBlock(b.id, { tasks: b.tasks || [] });
     });
+  }, // end generateDailySchedule
+  /**
+   * Generates a DailyPlan without persisting changes.
+   */
+  generateDailyPlan(): DailyPlan {
+    const availableHours = userRepository.getAvailableHours();
+    const currentBlocks = taskRepository.getBlocks();
+    const roadmaps = roadmapRepository.getRoadmaps();
+    const applications = careerRepository.getApplications();
+
+    const allPreviousTasks = currentBlocks.flatMap(b => b.tasks || []);
+    const carryOver = identifyCarryOverTasks(allPreviousTasks);
+
+    const allRoadmapItems = roadmaps.flatMap(r => r.items);
+    const eligibleRoadmapItems = getEligibleTopics(allRoadmapItems);
+
+    let daysUntilInterview: number | null = null;
+    const interviewDates = applications
+      .filter(app => app.interviewDate)
+      .map(app => new Date(app.interviewDate!));
+
+    if (interviewDates.length > 0) {
+      const nearest = new Date(Math.min(...interviewDates.map(d => d.getTime())));
+      const today = new Date();
+      const diffTime = nearest.getTime() - today.getTime();
+      daysUntilInterview = Math.max(0, Math.ceil(diffTime / (1000 * 60 * 60 * 24)));
+    }
+
+    const newTasksFromRoadmap: Task[] = eligibleRoadmapItems.map(item => {
+      const priorityScore = calculateTopicPriority(
+        item,
+        daysUntilInterview,
+        item.difficulty === 'Hard' ? 5 : item.difficulty === 'Medium' ? 3 : 1
+      );
+      let priority: Task['priority'] = 'Medium';
+      if (priorityScore > 75) priority = 'High';
+      else if (priorityScore < 35) priority = 'Low';
+      return {
+        id: `task-rm-${item.id}`,
+        blockId: '',
+        title: `Study: ${item.title}`,
+        description: `Learn next topic in roadmap. Prerequisites completed. Difficulty: ${item.difficulty}`,
+        estDuration: Math.round(item.estimatedHours * 60),
+        priority,
+        difficulty: item.difficulty,
+        status: 'Todo',
+        tags: ['Roadmap', item.difficulty],
+        attachments: [],
+        notes: '',
+        resources: item.resources.map(r => ({ title: r.title, url: r.url })),
+        roadmapRefId: item.id,
+        aiSuggestions: `Priority Score: ${priorityScore}% calculated by Planning Engine.`,
+        progress: 0,
+        checklist: item.practiceQuestions.map((q, qidx) => ({
+          id: `checklist-pq-${item.id}-${qidx}`,
+          title: `Practice: ${q.question}`,
+          done: false
+        })),
+        createdAt: new Date().toISOString()
+      };
+    });
+
+    const allCandidateTasks = mergeTasksWithoutDuplicates(carryOver, newTasksFromRoadmap);
+
+    const emptyBlocks: StudyBlock[] = currentBlocks.map(b => ({
+      ...b,
+      tasks: []
+    }));
+
+    const scheduledBlocks = scheduleTasksIntoBlocks(availableHours, emptyBlocks, allCandidateTasks);
+
+    const estimatedXP = calculateXP(allCandidateTasks);
+
+    const totalStudyHours = scheduledBlocks.reduce((sum, b) => sum + b.estHours, 0);
+    const summary = `Planned ${scheduledBlocks.length} study blocks with ${allCandidateTasks.length} tasks, estimated XP ${estimatedXP}.`;
+
+    return {
+      orderedStudyBlocks: scheduledBlocks,
+      scheduledTasks: allCandidateTasks,
+      carryOverTasks: carryOver,
+      revisionBlocks: [],
+      estimatedXP,
+      totalStudyHours,
+      summary,
+    };
   }
 };

@@ -254,3 +254,14 @@ export interface GraphEdge {
   relationType: 'PREREQUISITE_OF' | 'REFERENCES' | 'PRACTICED_IN' | 'TESTED_BY' | 'USED_IN' | 'REQUIRED_FOR';
   weight: number;
 }
+
+// DailyPlan interface for Planner Agent output
+export interface DailyPlan {
+  orderedStudyBlocks: StudyBlock[];
+  scheduledTasks: Task[];
+  carryOverTasks: Task[];
+  revisionBlocks: StudyBlock[];
+  estimatedXP: number;
+  totalStudyHours: number;
+  summary: string;
+}
